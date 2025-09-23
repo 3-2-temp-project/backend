@@ -1,7 +1,12 @@
 from flask import session
+import requests
 from sqlalchemy import func, literal
 from models import db, RestaurantInfo
+import os
 import math
+
+
+NAVER_GEOCODE_URL = "https://maps.apigw.ntruss.com/map-geocode/v2/geocode"
 
 def set_location_service(data):
     lat = data.get("lat")
@@ -18,6 +23,38 @@ def set_location_service(data):
     session["lat"] = lat
     session["lng"] = lng
     return {"lat": lat, "lng": lng}, "위치 저장 완료", 200
+
+def geocode_address_service(address: str):
+    if not address:
+        return None, "주소는 필수입니다.", 400
+
+    headers = {
+        "X-NCP-APIGW-API-KEY-ID": os.getenv("NAVER_CLIENT_ID"),
+        "X-NCP-APIGW-API-KEY": os.getenv("NAVER_CLIENT_SECRET"),
+    }
+    params = {"query": address}
+
+    try:
+        res = requests.get(NAVER_GEOCODE_URL, headers=headers, params=params, timeout=5)
+        print("NAVER API Response:", res.text)
+        if res.status_code != 200:
+            return None, f"네이버 API 호출 실패: {res.status_code}", 500
+
+        data = res.json()
+        if not data.get("addresses"):
+            return None, "해당 주소를 찾을 수 없습니다.", 404
+
+        addr_info = data["addresses"][0]
+        lat = float(addr_info["y"])
+        lng = float(addr_info["x"])
+
+        # 세션에 저장
+        session["lat"] = lat
+        session["lng"] = lng
+
+        return {"address": address, "lat": lat, "lng": lng}, "주소 변환 성공", 200
+    except Exception as e:
+        return None, f"에러 발생: {str(e)}", 500
 
 def get_restaurant_markers_service(limit=None):
     q = RestaurantInfo.query
@@ -77,30 +114,34 @@ def _haversine_km(lat1, lng1, lat2, lng2):
     c = 2 * math.asin(math.sqrt(a))
     return R * c
 
-def get_restaurants_nearby_service(lat, lng, radius_km=3.0, limit=200):
+def get_restaurants_nearby_service(radius_km=3.0, limit=200):
+    # 세션에서 위치 가져오기
+    lat = session.get("lat")
+    lng = session.get("lng")
+
     # 입력 검증
     if lat is None or lng is None:
-        return "위도/경도는 필수입니다.", 400
+        return None, "세션에 위치 정보가 없습니다. 먼저 /location 또는 /location/address 로 위치를 저장하세요.", 400
     try:
         lat = float(lat); lng = float(lng); radius_km = float(radius_km)
     except:
-        return "위도/경도/반경은 숫자여야 합니다.", 400
+        return None, "위도/경도/반경은 숫자여야 합니다.", 400
     if not (-90 <= lat <= 90 and -180 <= lng <= 180):
-        return "위도/경도 범위가 올바르지 않습니다.", 400
+        return None, "위도/경도 범위가 올바르지 않습니다.", 400
     if radius_km <= 0:
-        return "반경(km)은 0보다 커야 합니다.", 400
+        return None, "반경(km)은 0보다 커야 합니다.", 400
 
-    # 1차: 바운딩 박스(위도 1도 ≈ 111km, 경도는 위도에 따라 변함)
+    # 1차: 바운딩 박스
     lat_delta = radius_km / 111.0
     lng_delta = radius_km / (111.0 * max(1e-6, math.cos(math.radians(lat))))
 
     candidates = (RestaurantInfo.query
                   .filter(RestaurantInfo.lat.between(lat - lat_delta, lat + lat_delta))
                   .filter(RestaurantInfo.lng.between(lng - lng_delta, lng + lng_delta))
-                  .limit(limit * 5)   # 후보를 넉넉히
+                  .limit(limit * 5)
                   .all())
 
-    # 2차: 파이썬에서 정확 거리 계산 + 반경 필터 + 거리순 정렬
+    # 2차: 하버사인 거리 계산 + 필터링
     results = []
     for r in candidates:
         d = _haversine_km(lat, lng, r.lat, r.lng)
@@ -119,7 +160,6 @@ def get_restaurants_nearby_service(lat, lng, radius_km=3.0, limit=200):
             })
 
     results.sort(key=lambda x: x["distance_km"])
-    # 최종 상한
     results = results[:limit]
 
     return results, 200
