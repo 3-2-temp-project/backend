@@ -55,14 +55,10 @@ def get_restaurant_detail_by_coords():
 
 
 
-# 반경 검색
 @location_bp.route("/restaurants/nearby", methods=["GET"])
 def get_restaurants_nearby():
-    lat = request.args.get("lat", type=float)
-    lng = request.args.get("lng", type=float)
     radius = request.args.get("radius", default=3, type=float)
-
-    result, status = get_restaurants_nearby_service(lat, lng, radius)
+    result, status = get_restaurants_nearby_service(radius)
     if status != 200:
         return jsonify({"message": result}), status
     return jsonify(result), status
