@@ -1,7 +1,12 @@
 from flask import session
+import requests
 from sqlalchemy import func, literal
 from models import db, RestaurantInfo
+import os
 import math
+
+
+NAVER_GEOCODE_URL = "https://maps.apigw.ntruss.com/map-geocode/v2/geocode"
 
 def set_location_service(data):
     lat = data.get("lat")
@@ -18,6 +23,38 @@ def set_location_service(data):
     session["lat"] = lat
     session["lng"] = lng
     return {"lat": lat, "lng": lng}, "위치 저장 완료", 200
+
+def geocode_address_service(address: str):
+    if not address:
+        return None, "주소는 필수입니다.", 400
+
+    headers = {
+        "X-NCP-APIGW-API-KEY-ID": os.getenv("NAVER_CLIENT_ID"),
+        "X-NCP-APIGW-API-KEY": os.getenv("NAVER_CLIENT_SECRET"),
+    }
+    params = {"query": address}
+
+    try:
+        res = requests.get(NAVER_GEOCODE_URL, headers=headers, params=params, timeout=5)
+        print("NAVER API Response:", res.text)
+        if res.status_code != 200:
+            return None, f"네이버 API 호출 실패: {res.status_code}", 500
+
+        data = res.json()
+        if not data.get("addresses"):
+            return None, "해당 주소를 찾을 수 없습니다.", 404
+
+        addr_info = data["addresses"][0]
+        lat = float(addr_info["y"])
+        lng = float(addr_info["x"])
+
+        # 세션에 저장
+        session["lat"] = lat
+        session["lng"] = lng
+
+        return {"address": address, "lat": lat, "lng": lng}, "주소 변환 성공", 200
+    except Exception as e:
+        return None, f"에러 발생: {str(e)}", 500
 
 def get_restaurant_markers_service(limit=None):
     q = RestaurantInfo.query

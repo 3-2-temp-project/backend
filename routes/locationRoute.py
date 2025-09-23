@@ -2,7 +2,8 @@ from flask import Blueprint, request, jsonify
 from services.locationService import (
     set_location_service,
     get_restaurant_markers_service,
-    get_restaurants_nearby_service
+    get_restaurants_nearby_service,
+    geocode_address_service
 )
 
 location_bp = Blueprint("location", __name__)
@@ -16,6 +17,16 @@ def set_location():
         return jsonify({"message": msg}), status
     return jsonify({"message": msg, "data": result}), status
 
+# 주소 받아와 위치 설정
+@location_bp.route("/location/address", methods=["POST"])
+def set_location_by_address():
+    data = request.json
+    address = data.get("address")
+
+    result, msg, status = geocode_address_service(address)
+    if status != 200:
+        return jsonify({"message": msg}), status
+    return jsonify({"message": msg, "data": result}), status
 
 # 모든 지도 마커 조회
 @location_bp.route("/restaurants/markers", methods=["GET"])
