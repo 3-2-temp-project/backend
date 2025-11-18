@@ -27,7 +27,7 @@ class UTF8JSONProvider(DefaultJSONProvider):
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 app.json_provider_class = UTF8JSONProvider
 app.json = app.json_provider_class(app)
 app.config['JSON_AS_ASCII'] = False
