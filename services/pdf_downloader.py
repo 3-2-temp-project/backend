@@ -26,6 +26,8 @@ from bs4 import BeautifulSoup
 from typing import Dict, List, Tuple, Optional, Set, Any, Union
 import warnings
 warnings.filterwarnings('ignore')
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
 
 EXECUTOR_KIND_DEFAULT = os.getenv("DOWNLOADER_EXECUTOR", "process").lower()
 RUNNING_IN_FLASK_DEFAULT = os.getenv("RUN_FROM_FLASK", "0").lower() in ("1", "true", "yes", "y")

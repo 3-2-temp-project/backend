@@ -16,8 +16,14 @@ class RestaurantInfo(db.Model):
     lng = db.Column(db.Float, nullable=False)
     res_phone = db.Column(db.String(32), nullable=True)
     category = db.Column(db.String(32), nullable=True)
-    price = db.Column(db.Integer, nullable=True)
+    price = db.Column(db.Integer, nullable=True)  # 대표 가격 (평균)
     score = db.Column(db.Float, nullable=True)
+    # 가격 통계 필드 추가
+    price_min = db.Column(db.Integer, nullable=True)  # 최저 가격
+    price_max = db.Column(db.Integer, nullable=True)  # 최고 가격
+    price_avg = db.Column(db.Integer, nullable=True)  # 평균 가격
+    price_count = db.Column(db.Integer, default=0)    # 가격 데이터 수집 횟수
+    people = db.Column(db.Integer, nullable=True)      # 평균 인원수(명)
 
 # 사용자 테이블
 class User(db.Model, UserMixin):
@@ -46,10 +52,15 @@ class Review(db.Model):
     id         = db.Column(db.Integer, primary_key=True, autoincrement=True)
     res_id     = db.Column(db.Integer, db.ForeignKey('restaurant_info.res_id', ondelete="CASCADE"), nullable=False)
     user_id    = db.Column(db.Integer, db.ForeignKey('users.user_num',       ondelete="CASCADE"), nullable=False)
+    user_nickname = db.Column(db.String(32), nullable=False)  # ✅ 여기 추가
     content    = db.Column(db.Text, nullable=False)
     rating     = db.Column(db.Integer, nullable=False)  # 1~5
     photo_url  = db.Column(db.String(255))
     created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    user = db.relationship("User", backref="reviews")
+
+    
 
 # 제보 테이블
 class Suggestion(db.Model):

@@ -6,17 +6,18 @@ import os
 import math
 
 
-# 평점 검증(1~5)
+# 공통: 평점 검증(1~5)
 def _validate_rating(v):
     try:
         v = int(v)
-    except:
+    except Exception:
         return None, "rating은 1~5 정수여야 합니다."
     if not (1 <= v <= 5):
         return None, "rating은 1~5 범위여야 합니다."
     return v, None
 
-# 식당 평균 평점 갱신
+
+# 공통: 식당 평균 평점 갱신
 def _recalc_restaurant_score(res_id):
     avg = db.session.query(func.avg(Review.rating)).filter(Review.res_id == res_id).scalar()
     r = RestaurantInfo.query.get(res_id)
@@ -24,6 +25,27 @@ def _recalc_restaurant_score(res_id):
         r.score = float(avg) if avg is not None else None
         db.session.add(r)
         db.session.commit()
+
+
+# 공통: 리뷰 직렬화(닉네임 포함)
+def _serialize_review(r: Review):
+    # 혹시 과거 데이터에서 user_nickname 이 비어 있으면 User 테이블에서 한 번 더 가져오기
+    nickname = r.user_nickname
+    if nickname is None:
+        user = User.query.get(r.user_id)
+        if user:
+            nickname = user.user_nickname
+
+    return {
+        "id": r.id,
+        "res_id": r.res_id,
+        "user_id": r.user_id,
+        "user_nickname": nickname,
+        "content": r.content,
+        "rating": r.rating,
+        "photo_url": r.photo_url,
+        "created_at": r.created_at.isoformat() if r.created_at else None
+    }
 
 
 # 리뷰 생성
@@ -46,15 +68,20 @@ def create_review_service(data):
         return None, err, 400
 
     # FK 존재 확인
-    if RestaurantInfo.query.get(res_id) is None:
+    restaurant = RestaurantInfo.query.get(res_id)
+    if restaurant is None:
         return None, "해당 res_id 식당이 존재하지 않습니다.", 404
-    if User.query.get(user_id) is None:
+
+    user = User.query.get(user_id)
+    if user is None:
         return None, "해당 user_id 사용자가 존재하지 않습니다.", 404
 
     try:
+        # ✅ 여기서 user.user_nickname 을 리뷰 테이블 컬럼에 같이 저장
         review = Review(
             res_id=res_id,
             user_id=user_id,
+            user_nickname=user.user_nickname,
             content=content,
             rating=rating,
             photo_url=photo_url
@@ -64,15 +91,8 @@ def create_review_service(data):
 
         _recalc_restaurant_score(res_id)
 
-        return {
-            "id": review.id,
-            "res_id": review.res_id,
-            "user_id": review.user_id,
-            "content": review.content,
-            "rating": review.rating,
-            "photo_url": review.photo_url,
-            "created_at": review.created_at.isoformat() if review.created_at else None
-        }, "리뷰가 등록되었습니다.", 201
+        return _serialize_review(review), "리뷰가 등록되었습니다.", 201
+
     except Exception as e:
         db.session.rollback()
         return None, f"리뷰 생성 중 오류: {str(e)}", 500
@@ -95,17 +115,8 @@ def get_reviews_by_restaurant_service(res_id, page=1, per_page=20, order="recent
         q = q.order_by(Review.created_at.desc())
 
     p = q.paginate(page=page, per_page=per_page, error_out=False)
-    items = []
-    for r in p.items:
-        items.append({
-            "id": r.id,
-            "res_id": r.res_id,
-            "user_id": r.user_id,
-            "content": r.content,
-            "rating": r.rating,
-            "photo_url": r.photo_url,
-            "created_at": r.created_at.isoformat() if r.created_at else None
-        })
+
+    items = [_serialize_review(r) for r in p.items]
 
     return {
         "items": items,
@@ -121,15 +132,7 @@ def get_review_detail_service(review_id):
     r = Review.query.get(review_id)
     if not r:
         return None, "해당 리뷰가 존재하지 않습니다.", 404
-    return {
-        "id": r.id,
-        "res_id": r.res_id,
-        "user_id": r.user_id,
-        "content": r.content,
-        "rating": r.rating,
-        "photo_url": r.photo_url,
-        "created_at": r.created_at.isoformat() if r.created_at else None
-    }, "리뷰 상세", 200
+    return _serialize_review(r), "리뷰 상세", 200
 
 
 # 리뷰 수정
@@ -162,6 +165,13 @@ def update_review_service(review_id, data, actor_user_id=None, is_admin=False):
         r.photo_url = data.get("photo_url")
         changed = True
 
+    # 필요하면 닉네임 동기화 옵션
+    if data.get("sync_nickname"):
+        user = User.query.get(r.user_id)
+        if user:
+            r.user_nickname = user.user_nickname
+            changed = True
+
     if not changed:
         return None, "변경할 필드가 없습니다.", 400
 
@@ -169,15 +179,7 @@ def update_review_service(review_id, data, actor_user_id=None, is_admin=False):
         db.session.add(r)
         db.session.commit()
         _recalc_restaurant_score(r.res_id)
-        return {
-            "id": r.id,
-            "res_id": r.res_id,
-            "user_id": r.user_id,
-            "content": r.content,
-            "rating": r.rating,
-            "photo_url": r.photo_url,
-            "created_at": r.created_at.isoformat() if r.created_at else None
-        }, "리뷰가 수정되었습니다.", 200
+        return _serialize_review(r), "리뷰가 수정되었습니다.", 200
     except Exception as e:
         db.session.rollback()
         return None, f"리뷰 수정 중 오류: {str(e)}", 500

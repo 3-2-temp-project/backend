@@ -1,8 +1,11 @@
 import os
+from pathlib import Path
 from flask import Flask
 from dotenv import load_dotenv
 from flask_login import LoginManager
-from models import db, User, RestaurantInfo  # ✅ RestaurantInfo를 가져와 사후 검증에 사용
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+from models import db, User, RestaurantInfo
 from services.mailService import mail
 from routes.authRoute import auth_bp
 from routes.locationRoute import location_bp
@@ -10,30 +13,63 @@ from routes.reviewRoute import review_bp
 from routes.suggestionRoute import suggestion_bp
 from routes.badgeRoute import badge_bp
 from routes.visitRoute import visit_bp
+from routes.restaurantRoutes import restaurant_bp
+
 from flask.json.provider import DefaultJSONProvider
 
 import importlib
 import init_data as _init_data
-
-from flask_cors import CORS
-
 
 class UTF8JSONProvider(DefaultJSONProvider):
     def dumps(self, obj, **kwargs):
         kwargs.setdefault("ensure_ascii", False)
         return super().dumps(obj, **kwargs)
 
-# .env 로드
-load_dotenv()
+# ============================================
+# 환경 변수 로드 (명시적 경로 지정)
+# ============================================
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / '.env'
+
+print(f"[ENV] Current working directory: {os.getcwd()}")
+print(f"[ENV] Script location: {BASE_DIR}")
+print(f"[ENV] Looking for .env at: {ENV_PATH}")
+print(f"[ENV] .env exists: {ENV_PATH.exists()}")
+
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH, override=True)  # override=True로 명시적 로드
+    print(f"[ENV] ✓ .env loaded successfully from: {ENV_PATH}")
+else:
+    print(f"[ENV] ✗ .env not found at: {ENV_PATH}")
+    load_dotenv()  # 기본 경로에서 시도
+
+# 환경 변수 검증 및 디버깅
+print(f"\n[ENV] Environment variables check:")
+env_vars = {
+    'NAVER_CLIENT_ID': os.environ.get('NAVER_CLIENT_ID'),
+    'NAVER_CLIENT_SECRET': os.environ.get('NAVER_CLIENT_SECRET'),
+    'NAVER_LOCAL_SEARCH_CLIENT_ID': os.environ.get('NAVER_LOCAL_SEARCH_CLIENT_ID'),
+    'NAVER_LOCAL_SEARCH_CLIENT_SECRET': os.environ.get('NAVER_LOCAL_SEARCH_CLIENT_SECRET'),
+    'DATABASE_URL': os.environ.get('DATABASE_URL', '')[:50] + '...' if os.environ.get('DATABASE_URL') else None,
+}
+
+for key, value in env_vars.items():
+    status = '✓' if value else '✗'
+    display_value = value if value and len(str(value)) < 20 else (str(value)[:15] + '...' if value else 'Not set')
+    print(f"  {status} {key}: {display_value}")
+
+# 필수 환경 변수 체크
+critical_vars = ['DATABASE_URL', 'SECRET_KEY']
+missing_critical = [var for var in critical_vars if not os.environ.get(var)]
+if missing_critical:
+    print(f"\n[ENV] ⚠️  WARNING: Missing critical variables: {', '.join(missing_critical)}")
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 app.json_provider_class = UTF8JSONProvider
 app.json = app.json_provider_class(app)
 app.config['JSON_AS_ASCII'] = False
 app.config['JSONIFY_MIMETYPE'] = 'application/json; charset=utf-8'
 
-# 시크릿/DB
 app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY", "default_secret_key")
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -42,7 +78,22 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "pool_recycle": 1800,
 }
 
-# 로그인 매니저
+app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", app.config['SECRET_KEY'])
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 3600))
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = int(os.environ.get("JWT_REFRESH_TOKEN_EXPIRES", 2592000))
+app.config['JWT_TOKEN_LOCATION'] = ['headers']
+app.config['JWT_HEADER_NAME'] = 'Authorization'
+app.config['JWT_HEADER_TYPE'] = 'Bearer'
+
+CORS(app, 
+     supports_credentials=True,
+     origins=os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080").split(","),
+     allow_headers=["Content-Type", "Authorization"],
+     expose_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"])
+
+jwt = JWTManager(app)
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "auth.login"
@@ -50,6 +101,27 @@ login_manager.login_view = "auth.login"
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
+
+@jwt.user_identity_loader
+def user_identity_lookup(user):
+    return user.id
+
+@jwt.user_lookup_loader
+def user_lookup_callback(_jwt_header, jwt_data):
+    identity = jwt_data["sub"]
+    return db.session.get(User, identity)
+
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_payload):
+    return {"message": "토큰이 만료되었습니다.", "error": "token_expired"}, 401
+
+@jwt.invalid_token_loader
+def invalid_token_callback(error):
+    return {"message": "유효하지 않은 토큰입니다.", "error": "invalid_token"}, 401
+
+@jwt.unauthorized_loader
+def missing_token_callback(error):
+    return {"message": "인증 토큰이 필요합니다.", "error": "authorization_required"}, 401
 
 # env helpers
 def _env_flag(name, default="0"):
@@ -72,11 +144,6 @@ app.config['MAIL_USERNAME'] = os.environ.get("MAIL_USERNAME")
 app.config['MAIL_PASSWORD'] = os.environ.get("MAIL_PASSWORD")
 app.config['MAIL_DEFAULT_SENDER'] = os.environ.get("MAIL_USERNAME")
 
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = False 
-
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-
 # 확장 초기화
 db.init_app(app)
 mail.init_app(app)
@@ -88,6 +155,8 @@ app.register_blueprint(review_bp,     url_prefix="/reviews")
 app.register_blueprint(suggestion_bp, url_prefix="/suggestions")
 app.register_blueprint(badge_bp,      url_prefix="/badges")
 app.register_blueprint(visit_bp,      url_prefix="/visits")
+app.register_blueprint(restaurant_bp, url_prefix="/restaurants")
+
 
 @app.route("/")
 def index():
@@ -97,15 +166,14 @@ def run_pdf_downloader_inprocess():
     import sys
     from services.pdf_downloader import main as downloader_main
 
-    # 스레드 모드 신호
-    os.environ["RUN_FROM_FLASK"] = "1"                   # ← Flask 내부 실행 표시
-    os.environ.setdefault("DOWNLOADER_EXECUTOR", "thread")  # ← 스레드 실행 강제
+    os.environ["RUN_FROM_FLASK"] = "1"
+    os.environ.setdefault("DOWNLOADER_EXECUTOR", "thread")
 
     outdir   = os.getenv("PDF_BASE_DIR", "pdf_data")
     use_sln  = _env_flag("DOWNLOAD_SELENIUM", "0")
     debug    = _env_flag("DOWNLOAD_DEBUG", "0")
     testmode = _env_flag("DOWNLOAD_TEST", "0")
-    workers  = os.getenv("DOWNLOAD_WORKERS", "8")        # 원하는 병렬 스레드 수
+    workers  = os.getenv("DOWNLOAD_WORKERS", "8")
 
     argv = ["pdf_downloader", "--workers", workers, "--outdir", outdir]
     if use_sln: argv.append("--selenium")
@@ -122,19 +190,14 @@ def run_pdf_downloader_inprocess():
         sys.argv = _old_argv
 
 def run_pdf_downloader_subprocess():
-    """
-    다운로더를 별도 프로세스로 실행 (ProcessPoolExecutor 안전)
-    - services/pdf_downloader.py 가 모듈로 실행 가능해야 함(services 폴더에 __init__.py 필요)
-    """
     import sys, subprocess, os
 
     outdir   = os.getenv("PDF_BASE_DIR", "pdf_data")
-    workers  = os.getenv("DOWNLOAD_WORKERS", "12")   # 프로세스 개수
+    workers  = os.getenv("DOWNLOAD_WORKERS", "12")
     use_sln  = _env_flag("DOWNLOAD_SELENIUM", "0")
     debug    = _env_flag("DOWNLOAD_DEBUG", "0")
     testmode = _env_flag("DOWNLOAD_TEST", "0")
 
-    # 우선 모듈 실행 시도 (services 가 패키지여야 함: services/__init__.py 존재)
     args = [sys.executable, "-m", "services.pdf_downloader",
             "--workers", workers, "--outdir", outdir]
     if use_sln:  args.append("--selenium")
@@ -143,13 +206,11 @@ def run_pdf_downloader_subprocess():
 
     print("[DOWNLOAD_ON_BOOT] spawn:", " ".join(args))
 
-    # 현재 프로젝트 루트에서 실행되도록 보장
     cwd = os.path.dirname(os.path.abspath(__file__))
 
     try:
         subprocess.check_call(args, cwd=cwd)
     except Exception:
-        # 패키지 실행이 불가능하면 직접 파일 경로로 재시도
         script_path = os.path.join(cwd, "services", "pdf_downloader.py")
         alt_args = [sys.executable, script_path,
                     "--workers", workers, "--outdir", outdir]
@@ -163,79 +224,156 @@ def run_pdf_downloader_subprocess():
     print("[DOWNLOAD_ON_BOOT] done (subprocess)")
     
 if __name__ == "__main__":
-    # 리로더 자식에서 1회만
     run_once = (os.environ.get("WERKZEUG_RUN_MAIN") == "true") or (not app.debug)
+    INIT_DATA_ENABLE = _env_flag("INIT_DATA_ENABLE", "1")
 
     TESTMODE = _env_flag("TESTMODE", "0")
     if TESTMODE:
-        os.environ.setdefault("ALLOW_NO_GEOCODE", "1")  # 테스트 시 지오코딩 실패 허용
+        os.environ.setdefault("ALLOW_NO_GEOCODE", "1")
 
-    # 🔹 다운로드 전체 스킵 플래그
     DOWNLOAD_SKIP = _env_flag("DOWNLOAD_SKIP", "0")
 
     with app.app_context():
-        # 현재 연결된 DB 위치 확인 로그 (문제 추적에 도움)
-        try:
-            print(f"[DB] engine url = {db.engine.url}")
-        except Exception as e:
-            print("[DB] engine url 확인 실패:", e)
-
         RESET_DB = _env_flag("RESET_DB", "0")
         if RESET_DB:
+            print("[DB] Dropping and recreating all tables...")
             db.drop_all()
             db.create_all()
+            print("[DB] ✓ Tables recreated")
         else:
             db.create_all()
+            print("[DB] ✓ Tables verified/created")
 
         if run_once:
-            # 1) PDF/첨부 다운로더 실행 (v5 main() 직접 호출)
-            if (not TESTMODE) and _env_flag("DOWNLOAD_ON_BOOT", "1"):
-                if DOWNLOAD_SKIP:
-                    print("[DOWNLOAD_ON_BOOT] skipped due to DOWNLOAD_SKIP=1")
+            # 1) INIT_DATA_ENABLE이 켜져 있을 때만 init_data 실행
+            if INIT_DATA_ENABLE:
+                if (not TESTMODE) and _env_flag("DOWNLOAD_ON_BOOT", "1"):
+                    if DOWNLOAD_SKIP:
+                        print("[DOWNLOAD_ON_BOOT] skipped due to DOWNLOAD_SKIP=1")
+                    else:
+                        try:
+                            print("[DOWNLOAD_ON_BOOT] start")
+                            run_pdf_downloader_inprocess()
+                        except Exception as e:
+                            print("[DOWNLOAD_ON_BOOT] error:", repr(e))
                 else:
-                    try:
-                        print("[DOWNLOAD_ON_BOOT] start")
-                        run_pdf_downloader_inprocess()
-                    except Exception as e:
-                        print("[DOWNLOAD_ON_BOOT] error:", repr(e))
-            else:
-                print("[DOWNLOAD_ON_BOOT] skipped (TESTMODE or disabled)")
+                    print("[DOWNLOAD_ON_BOOT] skipped (TESTMODE or disabled)")
 
-            # 2) 파싱 → (지오코딩) → DB 업서트 (스트리밍/무제한 가능)
-            try:
-                INIT_LIMIT     = _env_int("INIT_LIMIT", 0)           # 0 또는 음수 → 무제한
-                INIT_CHUNK     = _env_int("INIT_CHUNK_SIZE", 1000)   # 배치 커밋 크기
-                USE_STREAMING  = _env_flag("USE_STREAMING_UPSERT", "1")
-                base_dir       = os.getenv("PDF_BASE_DIR", "pdf_data")
-
-                if USE_STREAMING:
-                    from init_data import refresh_init_data_and_insert_streaming
-                    effective_limit = 0 if INIT_LIMIT <= 0 else INIT_LIMIT
-                    refresh_init_data_and_insert_streaming(
-                        base_dir=base_dir,
-                        limit=effective_limit,           # ✅ 0이면 무제한
-                        commit_every=INIT_CHUNK,         # ✅ 이름 일치
-                        require_both=True,
-                        allow_no_geocode=True,
-                    )
-                else:
-                    from init_data import refresh_init_data_and_insert
-                    limit = None if INIT_LIMIT <= 0 else INIT_LIMIT
-                    refresh_init_data_and_insert(base_dir=base_dir, limit=limit)
-
-                # 모듈 리로드는 중복 호출 방지를 위해 유지만(캐시 초기화 용)
-                importlib.reload(_init_data)
-
-                # ✅ 사후 검증: 실제 테이블에 몇 건 들어갔는지 출력
                 try:
-                    total = db.session.execute(
-                        db.select(db.func.count()).select_from(RestaurantInfo)
-                    ).scalar_one()
-                    print(f"[VERIFY] restaurant_info count = {total}")
+                    INIT_LIMIT     = _env_int("INIT_LIMIT", 0)
+                    INIT_CHUNK     = _env_int("INIT_CHUNK_SIZE", 1000)
+                    USE_STREAMING  = _env_flag("USE_STREAMING_UPSERT", "1")
+                    base_dir       = os.getenv("PDF_BASE_DIR", "pdf_data")
+
+                    if USE_STREAMING:
+                        from init_data import refresh_init_data_and_insert_streaming
+                        effective_limit = 0 if INIT_LIMIT <= 0 else INIT_LIMIT
+                        refresh_init_data_and_insert_streaming(
+                            base_dir=base_dir,
+                            limit=effective_limit,
+                            commit_every=INIT_CHUNK,
+                            require_both=True,
+                            allow_no_geocode=True,
+                        )
+                    else:
+                        from init_data import refresh_init_data_and_insert
+                        limit = None if INIT_LIMIT <= 0 else INIT_LIMIT
+                        refresh_init_data_and_insert(base_dir=base_dir, limit=limit)
+
+                    importlib.reload(_init_data)
+
+                    try:
+                        total = db.session.execute(
+                            db.select(db.func.count()).select_from(RestaurantInfo)
+                        ).scalar_one()
+                        print(f"[VERIFY] restaurant_info count = {total}")
+                    except Exception as e:
+                        print("[VERIFY] count 확인 실패:", e)
+
                 except Exception as e:
-                    print("[VERIFY] count 확인 실패:", e)
+                    print("[INIT_DATA] refresh error:", e)
+            else:
+                print("[INIT_DATA] skipped (INIT_DATA_ENABLE=0)")
 
-            except Exception as e:
-                print("[INIT_DATA] refresh error:", e)
+            # ============================================
+            # REPAIR 기능 (에러 핸들링 강화)
+            # ============================================
+            ENABLE_REPAIR = _env_flag("ENABLE_REPAIR", "1")  # 기본값 1
+            
+            if ENABLE_REPAIR:
+                try:
+                    from init_data import repair_restaurant_info
+                    
+                    repair_mode  = os.getenv("REPAIR_MODE", "addr")
+                    repair_limit = _env_int("REPAIR_LIMIT", 1000)
+                    repair_dry   = _env_flag("REPAIR_DRY_RUN", "0")
+                    
+                    # API 키 검증
+                    has_geocode_api = bool(
+                        os.environ.get('NAVER_CLIENT_ID') and 
+                        os.environ.get('NAVER_CLIENT_SECRET')
+                    )
+                    has_local_api = bool(
+                        os.environ.get('NAVER_LOCAL_SEARCH_CLIENT_ID') and 
+                        os.environ.get('NAVER_LOCAL_SEARCH_CLIENT_SECRET')
+                    )
+                    
+                    print(f"\n[REPAIR] Configuration:")
+                    print(f"  - Mode: {repair_mode}")
+                    print(f"  - Limit: {repair_limit}")
+                    print(f"  - Dry run: {repair_dry}")
+                    print(f"  - Geocode API: {'✓' if has_geocode_api else '✗'}")
+                    print(f"  - Local Search API: {'✓' if has_local_api else '✗'}")
+                    
+                    # mode에 따라 필요한 API 체크
+                    can_proceed = True
+                    if repair_mode in ("addr", "all") and not has_geocode_api:
+                        print(f"[REPAIR] ⚠️  WARNING: Address repair requires NAVER_CLIENT_ID/SECRET")
+                        if repair_mode == "addr":
+                            can_proceed = False
+                        else:
+                            print(f"[REPAIR] Will skip address repair, continue with name repair only")
+                            repair_mode = "name"
+                    
+                    if repair_mode in ("name", "all") and not has_local_api:
+                        print(f"[REPAIR] ⚠️  WARNING: Name repair requires NAVER_LOCAL_SEARCH_CLIENT_ID/SECRET")
+                        if repair_mode == "name":
+                            can_proceed = False
+                        else:
+                            print(f"[REPAIR] Will skip name repair, continue with address repair only")
+                            repair_mode = "addr"
+                    
+                    if can_proceed:
+                        print(f"[REPAIR] Starting repair with mode: {repair_mode}")
+                        result = repair_restaurant_info(
+                            mode=repair_mode,
+                            limit=repair_limit,
+                            dry_run=repair_dry,
+                        )
+                        
+                        print(f"\n[REPAIR] ✓ Complete:")
+                        if result.get('addresses'):
+                            addr_stats = result['addresses']
+                            print(f"  Address repair: {addr_stats.get('updated', 0)} updated, "
+                                  f"{addr_stats.get('skipped', 0)} skipped, "
+                                  f"{addr_stats.get('errors', 0)} errors")
+                        
+                        if result.get('names'):
+                            name_stats = result['names']
+                            print(f"  Name repair: {name_stats.get('updated', 0)} updated, "
+                                  f"{name_stats.get('skipped', 0)} skipped, "
+                                  f"{name_stats.get('errors', 0)} errors")
+                    else:
+                        print(f"[REPAIR] ✗ Skipped: Missing required API credentials")
+                        
+                except ImportError as e:
+                    print(f"[REPAIR] ✗ Import error: {e}")
+                except Exception as e:
+                    print(f"[REPAIR] ✗ Error during repair: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("[REPAIR] Skipped (ENABLE_REPAIR=0)")
 
+    print("\n[APP] Starting Flask application...")
     app.run(host="0.0.0.0", port=_env_int("PORT", 5000), debug=True, threaded=True)
