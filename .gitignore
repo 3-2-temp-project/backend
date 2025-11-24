@@ -2,3 +2,12 @@ temp.py
 temp2.py
 temp3.py
 temp4.py
+
+
+# PDF 데이터
+pdf_data/
+*.pdf
+
+# 캐시/빌드
+__pycache__/
+*.pyc
