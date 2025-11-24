@@ -72,6 +72,11 @@ app.config['MAIL_USERNAME'] = os.environ.get("MAIL_USERNAME")
 app.config['MAIL_PASSWORD'] = os.environ.get("MAIL_PASSWORD")
 app.config['MAIL_DEFAULT_SENDER'] = os.environ.get("MAIL_USERNAME")
 
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE'] = False 
+
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+
 # 확장 초기화
 db.init_app(app)
 mail.init_app(app)
